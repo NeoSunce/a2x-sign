@@ -1,0 +1,27 @@
+name: 1A2X 每日签到
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 16 * * *"
+    - cron: "47 17 * * *"
+    - cron: "27 19 * * *"
+    - cron: "57 20 * * *"
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+      - name: 准备 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装依赖
+        run: pip install curl_cffi requests
+      - name: 执行签到
+        env:
+          A2X_COOKIE: ${{ secrets.A2X_COOKIE }}
+        run: python a2x_sign.py

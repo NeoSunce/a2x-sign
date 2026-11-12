@@ -15,11 +15,14 @@
 退出码：0 = 今日已签到（含重复签到提示）；1 = 失败。
 日志绝不打印 Cookie 原文。
 """
+import json
 import os
 import re
 import sys
+from datetime import datetime
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlencode
+from zoneinfo import ZoneInfo
 
 BASE = os.environ.get("A2X_BASE", "https://1a2x.com").rstrip("/")
 COOKIE = os.environ.get("A2X_COOKIE", "").strip()
@@ -45,6 +48,50 @@ def log(msg):
 def fail(msg):
     log("签到失败：" + msg)
     sys.exit(1)
+
+
+STATUS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "checkin_status.json")
+
+
+def _to_int(v):
+    try:
+        return int(str(v).replace(",", ""))
+    except Exception:
+        return None
+
+
+def write_status(reward, balance):
+    """把今日所得与当前余额写入 checkin_status.json，供每日 TG 核查读取展示。
+
+    同一天重复运行时，若本次拿不到今日所得（如已签到分支页面没写奖励数），
+    保留当天先前运行已记录的数值，不覆盖成空。
+    """
+    try:
+        tz = ZoneInfo("Asia/Shanghai")
+        today = datetime.now(tz).strftime("%Y-%m-%d")
+        prev = {}
+        if os.path.exists(STATUS_PATH):
+            with open(STATUS_PATH, encoding="utf-8") as f:
+                prev = json.load(f)
+        reward_i = _to_int(reward)
+        balance_i = _to_int(balance)
+        if reward_i is None and prev.get("date") == today:
+            reward_i = prev.get("today")
+        if balance_i is None and prev.get("date") == today:
+            balance_i = prev.get("balance")
+        data = {
+            "site": "1a2x",
+            "date": today,
+            "today": reward_i,
+            "balance": balance_i,
+            "unit": "香蕉",
+            "updated_at": datetime.now(tz).isoformat(timespec="seconds"),
+        }
+        with open(STATUS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        log(f"状态文件已更新：今日所得 {data['today']}，当前余额 {data['balance']}")
+    except Exception as e:
+        log(f"写状态文件失败（不影响签到结果）：{type(e).__name__}")
 
 
 class FormParser(HTMLParser):
@@ -91,12 +138,18 @@ def find_checkin_form(html):
 
 
 def page_state(html):
-    """返回 (是否已签到, 香蕉余额或None)。"""
+    """返回 (是否已签到, 香蕉余额或None, 今日签到所得或None)。"""
     text = re.sub(r"<[^>]+>", " ", html)
     already = any(w in text for w in ALREADY_WORDS)
-    m = re.search(r"余额[^0-9]{0,6}([0-9,]+)\s*香蕉|([0-9,]+)\s*香蕉", text)
-    balance = (m.group(1) or m.group(2)) if m else None
-    return already, balance
+    rm = re.search(r"今日已签到\s*\+?\s*([0-9]+)|已签到\s*\+\s*([0-9]+)", text)
+    today_reward = (rm.group(1) or rm.group(2)) if rm else None
+    # 余额提取前先剔除「今日已签到 +X」片段，避免把今日所得误当成余额
+    clean = re.sub(r"今日已签到\s*\+?\s*[0-9]+|已签到\s*\+\s*[0-9]+", " ", text)
+    m = (re.search(r"余额[^0-9]{0,6}([0-9,]+)", clean)
+         or re.search(r"香蕉[^0-9]{0,6}([0-9,]+)", clean)
+         or re.search(r"([0-9,]+)\s*香蕉", clean))
+    balance = m.group(1) if m else None
+    return already, balance, today_reward
 
 
 def get_page(sess, url):
@@ -135,10 +188,11 @@ def main():
     if html is None:
         fail("页面打不开，网络或站点异常")
 
-    already, bal_before = page_state(html)
+    already, bal_before, reward_before = page_state(html)
     if form is None:
         if already:
             log(f"签到成功：今天已经签过到了" + (f"（当前香蕉 {bal_before}）" if bal_before else ""))
+            write_status(reward_before, bal_before)
             return
         fail("没找到签到表单，也没看到已签到标记——可能未登录或页面改版，需要人工检查")
 
@@ -186,17 +240,18 @@ def main():
     # 3) 回查：再打开成长页确认状态
     r2 = get_page(sess, BASE + "/growth")
     html2 = r2.text if r2.status_code == 200 else r.text
-    already2, bal_after = page_state(html2)
+    already2, bal_after, reward_after = page_state(html2)
     body_text = re.sub(r"<[^>]+>", " ", r.text)
     got = re.search(r"(?:获得|奖励|签到成功)[^0-9]{0,8}([0-9]+)\s*香蕉", body_text)
 
     if already2 or got or any(w in body_text for w in ("签到成功",)):
-        reward = got.group(1) if got else None
+        reward = got.group(1) if got else reward_after
         msg = "签到成功："
         msg += f"今天签到获得 {reward} 香蕉" if reward else "今日签到已完成"
         if bal_after:
             msg += f"（当前香蕉 {bal_after}）"
         log(msg)
+        write_status(reward, bal_after)
         return
     if already and not form:
         log("签到成功：今天已经签过到了")

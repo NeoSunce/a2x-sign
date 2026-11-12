@@ -3,10 +3,15 @@ name: 1A2X 每日签到
 on:
   workflow_dispatch:
   schedule:
+    # 北京时间 00:17 / 01:47 / 03:27 / 04:57（UTC 前一日 16:17 / 17:47 / 19:27 / 20:57）
+    # GitHub 定时常迟到几小时，多档兜底、全在凌晨；脚本幂等，重复运行只会提示已签到
     - cron: "17 16 * * *"
     - cron: "47 17 * * *"
     - cron: "27 19 * * *"
     - cron: "57 20 * * *"
+
+permissions:
+  contents: write  # 允许把签到数值状态文件 checkin_status.json 提交回仓库
 
 jobs:
   checkin:
@@ -15,13 +20,26 @@ jobs:
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
+
       - name: 准备 Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: 安装依赖
         run: pip install curl_cffi requests
+
       - name: 执行签到
         env:
           A2X_COOKIE: ${{ secrets.A2X_COOKIE }}
         run: python a2x_sign.py
+
+      - name: 提交签到数值状态文件
+        if: success()
+        run: |
+          if [ -f checkin_status.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add checkin_status.json
+            git diff --cached --quiet || (git commit -m "chore: update checkin status" && git push)
+          fi
